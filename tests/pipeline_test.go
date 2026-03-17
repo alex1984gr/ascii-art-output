@@ -3,7 +3,6 @@ package tests
 import (
 	"bytes"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -13,9 +12,9 @@ import (
 func TestPipeline_Run_FullFlow(t *testing.T) {
 	// Provide arguments as they would be from command line
 	args := []string{
-		"--font=standard",
 		"--color=red",
 		"Hello",
+		"standard",
 	}
 
 	// Use bytes.Buffer instead of stdout for testing
@@ -66,10 +65,11 @@ func TestPipeline_Run_NoInput(t *testing.T) {
 }
 
 func TestPipeline_Run_OutputLongFlag(t *testing.T) {
-	tempDir := t.TempDir()
-	outputPath := filepath.Join(tempDir, "long-flag.txt")
+	// filepath.Base is applied by writerFor, so the file lands in the current working directory
+	fileName := "long-flag.txt"
+	t.Cleanup(func() { os.Remove(fileName) }) // Remove the file after the test
 
-	args := []string{"--output=" + outputPath, "Hello"}
+	args := []string{"--output=" + fileName, "Hello"}
 	var out bytes.Buffer
 
 	exitCode := pipeline.Run(args, &out)
@@ -77,7 +77,7 @@ func TestPipeline_Run_OutputLongFlag(t *testing.T) {
 		t.Fatalf("expected exit code 0, got %d", exitCode)
 	}
 
-	data, err := os.ReadFile(outputPath)
+	data, err := os.ReadFile(fileName)
 	if err != nil {
 		t.Fatalf("expected output file to be created: %v", err)
 	}
@@ -86,11 +86,12 @@ func TestPipeline_Run_OutputLongFlag(t *testing.T) {
 	}
 }
 
-func TestPipeline_Run_OutputShortFlag(t *testing.T) {
-	tempDir := t.TempDir()
-	outputPath := filepath.Join(tempDir, "short-flag.txt")
+func TestPipeline_Run_OutputWithBanner(t *testing.T) {
+	// filepath.Base is applied by writerFor, so the file lands in the current working directory
+	fileName := "banner-flag.txt"
+	t.Cleanup(func() { os.Remove(fileName) }) // Remove the file after the test
 
-	args := []string{"--out=" + outputPath, "Hello"}
+	args := []string{"--output=" + fileName, "Hello", "shadow"}
 	var out bytes.Buffer
 
 	exitCode := pipeline.Run(args, &out)
@@ -98,7 +99,7 @@ func TestPipeline_Run_OutputShortFlag(t *testing.T) {
 		t.Fatalf("expected exit code 0, got %d", exitCode)
 	}
 
-	data, err := os.ReadFile(outputPath)
+	data, err := os.ReadFile(fileName)
 	if err != nil {
 		t.Fatalf("expected output file to be created: %v", err)
 	}

@@ -1,134 +1,78 @@
-// Package pipeline orchestrates the ASCII art generation process
+// Package pipeline orchestrates all ASCII art generation stages in order
 package pipeline
 
 import (
-	"fmt"     // Formatted I/O functions for error messages
-	"io"      // Basic I/O interfaces like Writer
-	"os"      // Operating system functionality for file operations
-	"strings" // String manipulation functions
+	"fmt"           // Formatted I/O for writing error messages
+	"io"            // I/O interfaces (Writer) used for output destination
+	"os"            // OS-level file creation and stderr access
+	"path/filepath" // File path utilities for safe filename handling
 )
 
-// Run executes the complete ASCII art pipeline from input to output.
-// It parses command-line arguments, validates input, loads the banner,
-// renders ASCII art, applies optional color, and writes the output.
+// Run is the single entry point called by main.
+// It orchestrates every pipeline stage in order and returns 0 on success, 1 on error.
+// Stages: parseArgs → ValidateInput → LoadBanner → Tokenize → RenderLines → (color) → WriteOutput
 func Run(args []string, stdout io.Writer) int {
-	// Initialize default configuration values
-	font := "standard" // Default banner font
-	outFile := ""      // Empty means write to stdout
-	fontSet := false
-	var input string     // Text to convert to ASCII art
-	var colorName string // Color to apply
-	var substring string // Substring to color (empty means color entire output)
-
-	// Parse command-line arguments manually
-	// Expected formats:
-	// 1. go run . --color=<color> <substring> "text"
-	// 2. go run . --color=<color> "text" (no substring, color entire output)
-	// 3. go run . "text" (no color)
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		// Check for --font= flag
-		if strings.HasPrefix(arg, "--font=") {
-			// Extract font name by removing prefix
-			font = strings.TrimPrefix(arg, "--font=")
-			fontSet = true
-			// Check for --out= or --output= flag
-		} else if strings.HasPrefix(arg, "--out=") || strings.HasPrefix(arg, "--output=") {
-			if strings.HasPrefix(arg, "--output=") {
-				outFile = strings.TrimPrefix(arg, "--output=")
-			} else {
-				outFile = strings.TrimPrefix(arg, "--out=")
-			}
-			// Check for --color= flag
-		} else if strings.HasPrefix(arg, "--color=") {
-			// Extract color name
-			colorName = strings.TrimPrefix(arg, "--color=")
-			// Next argument should be either substring or input text
-			if i+1 < len(args) {
-				i++
-				// If there's another argument after this, this is the substring
-				if i+1 < len(args) {
-					substring = args[i]
-					i++
-					input = args[i]
-				} else {
-					// Only one argument left, it's the input text
-					input = args[i]
-				}
-			}
-			// If not a flag and input not set yet, this is the input text
-		} else if input == "" {
-			input = arg
-		} else if !fontSet && isBannerName(arg) {
-			// Support positional [STRING] [BANNER] when --font is not provided.
-			font = arg
-		}
-	}
-
-	// Validate that user provided input
-	if input == "" {
-		// Print error to stderr
-		fmt.Fprintln(os.Stderr, "no input provided")
-		return 1 // Return failure exit code
-	}
-
-	// Convert escaped newlines from CLI input into actual newline characters.
-	input = strings.ReplaceAll(input, "\\n", "\n")
-
-	// Validate input text (length, allowed characters, etc.)
-	if err := ValidateInput(input); err != nil {
-		fmt.Fprintln(os.Stderr, "invalid input:", err)
-		return 1
-	}
-
-	// Tokenize input string into individual characters
-	tokens := Tokenize(input)
-	// Load banner file and parse into character-to-glyph map
-	banner, err := LoadBanner(font)
+	// Stage 1: parse flags (--output, --color) and positional arguments using the flag package
+	cfg, err := parseArgs(args)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "failed loading banner:", err)
+		// parseArgs returns the usage string as the error message
+		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
 
-	// Render ASCII art lines from tokens using banner
-	lines := RenderLines(tokens, banner)
+	// Stage 2: validate the input text (rejects empty, too-long, or non-printable characters)
+	if err := ValidateInput(cfg.input); err != nil {
+		fmt.Fprintf(os.Stderr, "invalid input: %v\n", err.Error())
+		return 1
+	}
 
-	// Apply color if --color flag was provided
-	if colorName != "" {
-		// Apply ANSI color codes to rendered lines
-		// Pass the banner so ColorLines can render the substring if needed
-		lines, err = ColorLinesWithBanner(lines, colorName, substring, banner)
+	// Stage 3: load the chosen banner font file into a map of character → 8 ASCII art lines
+	banner, err := LoadBanner(cfg.font)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed loading banner: %v\n", err.Error())
+		return 1
+	}
+
+	// Stage 4+5: split input into individual character tokens, then render ASCII art lines
+	lines := RenderLines(Tokenize(cfg.input), banner)
+
+	// Stage 6 (optional): apply ANSI color after rendering so rendering logic stays pure
+	// Color formatting is applied after rendering, ensuring that rendering logic remains
+	// pure and independent of presentation concerns.
+	if cfg.colorName != "" {
+		// Color the full output, or only the ASCII art rows that match the substring
+		lines, err = ColorLinesWithBanner(lines, cfg.colorName, cfg.substring, banner)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "color error:", err)
+			fmt.Fprintf(os.Stderr, "color error: %v\n", err.Error())
 			return 1
 		}
 	}
 
-	// Determine output destination (file or stdout)
-	var w io.Writer = stdout
-	if outFile != "" {
-		// Create output file (overwrites if exists)
-		f, err := os.Create(outFile)
+	// Stage 7: determine the output destination — file or stdout
+	var w io.Writer = stdout // default: write to stdout
+	if cfg.outFile != "" {
+		// filepath.Base strips any directory components from the user-supplied filename,
+		// restricting output to the current directory and preventing path traversal attacks
+		// (e.g. --output=../../etc/passwd becomes just "passwd" and is written locally)
+		safeName := filepath.Base(cfg.outFile)
+		// Create (or overwrite) the output file using only the safe base filename
+		f, err := os.Create(safeName) //nolint
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "failed creating output file:", err)
+			// Do not include the filename in the error to avoid echoing user input to stderr
+			fmt.Fprintln(os.Stderr, "failed creating output file")
 			return 1
 		}
-		// Ensure file is closed when function returns
-		defer f.Close()
-		// Set writer to file instead of stdout
-		w = f
+		// defer guarantees the file handle is released when Run returns, even on error paths
+		defer f.Close() //nolint
+		w = f // redirect all subsequent writes to the file instead of stdout
 	}
 
-	// Write final ASCII art lines to output destination
+	// Stage 7: write every ASCII art line to the chosen destination, separated by newlines
 	if err := WriteOutput(lines, w); err != nil {
-		fmt.Fprintln(os.Stderr, "failed writing output:", err)
+		fmt.Fprintf(os.Stderr, "failed writing output: %v\n", err.Error())
 		return 1
 	}
 
-	// Return success exit code
+	// All stages completed successfully; exit code 0 signals success to the shell
 	return 0
-}
-
-func isBannerName(name string) bool {
-	return name == "standard" || name == "shadow" || name == "thinkertoy"
 }
